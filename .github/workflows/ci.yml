@@ -1,0 +1,60 @@
+name: CI
+
+# One run per branch at a time: a new push cancels the previous run, so bulk
+# uploads only ever complete the last run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main, saif-features]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  jvm-tests:
+    # The JVM modules need no native pjsua2 build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          # No wrapper jar in the repo snapshot (binary), so install Gradle directly.
+          gradle-version: 9.6.0
+      - run: gradle :sip:test :gateway:test :voice-api:test :telephony:test :privileged:test :app:test
+
+  build-apk:
+    # Debug APK for the user to install (no signing keys; the debug keystore is generated).
+    needs: jvm-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.6.0
+      - run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voice-sip-agent-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+      # Public download link for the APK (artifacts need auth to download).
+      # Skipped for pull requests.
+      - name: Publish debug APK as a release
+        if: github.event_name != 'pull_request'
+        run: |
+          gh release create "debug-${{ github.sha }}" \
+            --title "Debug build ${{ github.sha }}" \
+            --notes "Automated debug APK from branch ${{ github.ref_name }} (commit ${{ github.sha }})." \
+            app/build/outputs/apk/debug/*.apk
+        env:
+          GH_TOKEN: ${{ github.token }}
