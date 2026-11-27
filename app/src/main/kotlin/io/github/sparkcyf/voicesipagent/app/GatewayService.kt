@@ -21,7 +21,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
@@ -81,7 +80,9 @@ class GatewayService : Service() {
         if (statusJob == null) {
             val nm = getSystemService(NotificationManager::class.java)
             statusJob = scope.launch {
-                runtime.health.distinctUntilChanged().collect { h ->
+                // StateFlow already emits only on change; distinctUntilChanged() on a
+                // StateFlow is an error-level deprecation in kotlinx-coroutines 1.11.
+                runtime.health.collect { h ->
                     if (h.needsForegroundService) nm.notify(NOTIFICATION_ID, build(summary(h), h.session != null, isShizukuMissing(h)))
                     else stopGateway()
                 }
