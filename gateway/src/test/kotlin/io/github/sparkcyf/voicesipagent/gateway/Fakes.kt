@@ -55,6 +55,8 @@ class FakeLeg(kind: String, dir: LegDirection, remote: Party, target: String?, l
 class FakeEndpoint(override val name: String) : CallEndpoint {
     var handler: IncomingCallHandler? = null
     val dialed = CopyOnWriteArrayList<FakeLeg>()
+    /** The caller Party passed to each dial() (display name resolution is visible here). */
+    val callers = CopyOnWriteArrayList<Party>()
     var onDial: (FakeLeg) -> Unit = { it.remoteProceeding() }
     override val status = EndpointStatus(true, "ok")
     override fun setIncomingCallHandler(handler: IncomingCallHandler?) { this.handler = handler }
@@ -63,6 +65,7 @@ class FakeEndpoint(override val name: String) : CallEndpoint {
     override fun dial(target: String, caller: Party, line: Int?): CallLeg {
         val leg = FakeLeg(name, LegDirection.OUTBOUND, Party(target), target, line)
         dialed += leg
+        callers += caller
         onDial(leg)
         return leg
     }
