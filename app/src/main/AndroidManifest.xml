@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <!-- Side-menu features: SEND_SMS (SMS from iPhone, auto-reply), READ_CONTACTS (caller name). -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
