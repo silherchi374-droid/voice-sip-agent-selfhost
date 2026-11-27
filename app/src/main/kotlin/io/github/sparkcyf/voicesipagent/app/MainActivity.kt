@@ -1,12 +1,15 @@
 package io.github.sparkcyf.voicesipagent.app
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -25,7 +28,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -38,13 +46,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -69,6 +81,19 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : DialerRoleActivity() {
+    /** SMS + contacts runtime permissions for the side-menu features (SMS, caller name, auto-reply). */
+    private val permissionTick = mutableStateOf(0)
+    private val featurePermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            permissionTick.value++
+        }
+
+    private fun requestFeaturePermissions() {
+        featurePermissionLauncher.launch(
+            arrayOf(Manifest.permission.SEND_SMS, Manifest.permission.READ_CONTACTS),
+        )
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val runtime = GatewayRuntime.get(this)
@@ -76,8 +101,47 @@ class MainActivity : DialerRoleActivity() {
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
                 val message by roleMessage.collectAsState()
-                Scaffold { pad -> Screen(runtime, Modifier.padding(pad), ::requestDialer, ::switchDialer,
-                    ::chooseDialerInSettings, ::cancelDialerChange, ::setTakeoverFromUi, message) }
+                // Side menu (navigation drawer): all 12 new features live here; the main
+                // screen stays exactly as it is.
+                val drawerState = rememberDrawerState(DrawerValue.Closed)
+                val scope = rememberCoroutineScope()
+                var selectedFeature by remember { mutableStateOf<MoreFeature?>(null) }
+                // Bumps when the SMS/contacts permission dialog returns, so the drawer
+                // screens re-read the granted state.
+                val permissionVersion by permissionTick
+                ModalNavigationDrawer(
+                    drawerState = drawerState,
+                    drawerContent = {
+                        ModalDrawerSheet {
+                            Text(t("Доп. функции", "More features", "ميزات إضافية"),
+                                style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+                            MoreFeature.entries.forEach { f ->
+                                NavigationDrawerItem(
+                                    label = { Text(moreFeatureTitle(f)) },
+                                    selected = selectedFeature == f,
+                                    onClick = {
+                                        selectedFeature = f
+                                        scope.launch { drawerState.close() }
+                                    },
+                                )
+                            }
+                        }
+                    },
+                ) {
+                    Scaffold { pad ->
+                        if (selectedFeature == null) {
+                            Screen(runtime, Modifier.padding(pad), ::requestDialer, ::switchDialer,
+                                ::chooseDialerInSettings, ::cancelDialerChange, ::setTakeoverFromUi, message,
+                                onMenuClick = { scope.launch { drawerState.open() } })
+                        } else {
+                            key(permissionVersion) {
+                                MoreFeatureScreen(selectedFeature!!, runtime, Modifier.padding(pad),
+                                    onBack = { selectedFeature = null },
+                                    onRequestPermissions = ::requestFeaturePermissions)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -85,7 +149,8 @@ class MainActivity : DialerRoleActivity() {
 
 @Composable
 private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> Unit, switchDialer: () -> Unit,
-    chooseDialer: () -> Unit, cancelDialer: () -> Unit, setTakeover: (Boolean) -> Unit, roleMessage: String) {
+    chooseDialer: () -> Unit, cancelDialer: () -> Unit, setTakeover: (Boolean) -> Unit, roleMessage: String,
+    onMenuClick: () -> Unit) {
     val h by rt.health.collectAsState()
     val log by AppLog.tail.collectAsState()
     val cur by rt.settingsFlow.collectAsState()
@@ -96,7 +161,13 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("GSMtoSIP", style = MaterialTheme.typography.headlineSmall)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Text glyph (no material-icons dependency): the app already uses ● ○ ★ ⓘ.
+                IconButton(onClick = onMenuClick) {
+                    Text("☰", style = MaterialTheme.typography.titleLarge)
+                }
+                Text("GSMtoSIP", style = MaterialTheme.typography.headlineSmall)
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 val lang = UiLang.of(cur.uiLanguage)
                 TextButton(onClick = { rt.setUiLanguage("ru") }, enabled = lang != UiLang.RU) { Text("РУ") }
@@ -599,7 +670,7 @@ private fun CallLogSection(rt: GatewayRuntime) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun <T> Choice(
+internal fun <T> Choice(
     label: String,
     options: List<T>,
     selected: T,
@@ -625,7 +696,7 @@ private fun <T> Choice(
 }
 
 @Composable
-private fun Toggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit, info: String? = null, detail: () -> String) {
+internal fun Toggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit, info: String? = null, detail: () -> String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             LabelWithInfo(label, info)
@@ -636,7 +707,7 @@ private fun Toggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit,
 }
 
 @Composable
-private fun Field(label: String, value: String, type: KeyboardType = KeyboardType.Text, info: String? = null, onChange: (String) -> Unit) {
+internal fun Field(label: String, value: String, type: KeyboardType = KeyboardType.Text, info: String? = null, onChange: (String) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         OutlinedTextField(
             value = value, onValueChange = onChange, label = { Text(label) }, singleLine = true,
@@ -647,7 +718,7 @@ private fun Field(label: String, value: String, type: KeyboardType = KeyboardTyp
 }
 
 @Composable
-private fun Section(title: String, info: String? = null, content: @Composable () -> Unit) {
+internal fun Section(title: String, info: String? = null, content: @Composable () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             LabelWithInfo(title, info, style = MaterialTheme.typography.titleMedium)
