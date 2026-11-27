@@ -1,0 +1,66 @@
+package io.github.sparkcyf.voicesipagent.app
+
+import android.os.Bundle
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+
+/** Safe to display over the lockscreen: no configuration, caller numbers, or diagnostic logs.
+ * The gateway never wakes the screen or shows this over the lockscreen by itself (no
+ * setShowWhenLocked / setTurnScreenOn): it only opens when the user taps the notification. */
+class GatewayDialerActivity : DialerRoleActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val runtime = GatewayRuntime.get(this)
+        setContent {
+            val health by runtime.health.collectAsState()
+            val settings by runtime.settingsFlow.collectAsState()
+            val message by roleMessage.collectAsState()
+            MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
+                Scaffold { inset ->
+                    Column(Modifier.fillMaxSize().padding(inset).padding(24.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Text("Voice SIP Agent", style = MaterialTheme.typography.headlineSmall)
+                        Text(health.calls.summary)
+                        Text(if (health.session == null) "No gateway session" else "Gateway bridge active")
+                        // Avoid putting server names or low-level failure details on a locked screen.
+                        Text(when {
+                            health.takeoverOffPending -> "Gateway will turn off after current calls end."
+                            health.takeoverOnPending -> "Gateway will turn on after current calls end."
+                            health.dialerChangePending -> "Waiting for current calls to end before changing the dialer."
+                            !health.takeover -> "Gateway is off. Switch to your usual dialer to handle calls."
+                            health.cellularReady -> "Gateway is ready to bridge calls through the PBX."
+                            else -> "Gateway is unavailable. Open configuration or switch to your usual dialer."
+                        })
+                        Button(onClick = { setTakeoverFromUi(!settings.takeover) }, enabled = !health.dialerChangeRunning) {
+                            Text(if (settings.takeover) "Turn takeover off" else "Turn takeover on")
+                        }
+                        Text("For manual calls, restore your usual phone app or choose one in system Settings.")
+                        if (health.holdsDialer) Button(onClick = ::switchDialer, enabled = !health.dialerChangeRunning) { Text("Restore previous dialer") }
+                        OutlinedButton(onClick = ::chooseDialerInSettings, enabled = !health.dialerChangeRunning) { Text("Choose dialer in Settings") }
+                        if (health.dialerChangePending) OutlinedButton(onClick = ::cancelDialerChange) { Text("Cancel dialer change") }
+                        if (!health.holdsDialer && health.dialerRoleAvailable) {
+                            OutlinedButton(onClick = { setTakeoverFromUi(true) }, enabled = !health.dialerChangeRunning) { Text("Enable takeover") }
+                        }
+                        OutlinedButton(onClick = ::openConfiguration) { Text("Open configuration") }
+                        if (message.isNotEmpty()) Text(message)
+                    }
+                }
+            }
+        }
+    }
+}
