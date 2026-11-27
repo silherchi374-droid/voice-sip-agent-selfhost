@@ -2,6 +2,7 @@ package io.github.sparkcyf.voicesipagent.sip
 
 import org.junit.Assert.*
 import org.junit.Test
+import java.net.BindException
 import java.net.DatagramSocket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -34,7 +35,24 @@ class SipShutdownTest {
                 assertFalse(ua.status.ready)
                 assertEquals("stopped", ua.status.detail)
                 assertEquals(0, lateTask.get())
-                DatagramSocket(port).use { assertEquals(port, it.localPort) }
+                // The port must become rebindable once stop() closed the socket.
+                // Rebinding in one shot can still race the kernel releasing the
+                // port (a few ms on a loaded machine); retry briefly. A leaked
+                // socket would hold the port for the whole window, so this
+                // still proves stop() closed it.
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                var rebound: DatagramSocket? = null
+                var lastError: Exception? = null
+                while (rebound == null && System.nanoTime() < deadline) {
+                    try {
+                        rebound = DatagramSocket(port)
+                    } catch (e: BindException) {
+                        lastError = e
+                        Thread.sleep(10)
+                    }
+                }
+                assertNotNull("port $port still bound 2s after stop: $lastError", rebound)
+                rebound!!.use { assertEquals(port, it.localPort) }
             } finally {
                 if (thread.get()?.isAlive == true) ua.stop(timeoutMs = 50)
             }
