@@ -80,6 +80,36 @@ data class GatewaySettings(
     val smtpPassword: String = "",
     /** Where notifications go; blank = the sender address itself. */
     val emailRecipient: String = "",
+    // ---- Side-menu features (12 new, 2026-11-27) ----
+    /** Feature 1: allow SMS commands from the iPhone (SIP MESSAGE "SMS <number> <text>"). */
+    val smsCommandsEnabled: Boolean = true,
+    /** Feature 2: allow USSD commands from the iPhone ("USSD [code]"); default code *124#. */
+    val ussdCommandsEnabled: Boolean = true,
+    val ussdDefaultCode: String = "*124#",
+    /** Feature 3: email once when the battery drops below 20% (re-arm above 25% / on charger). */
+    val lowBatteryAlertEnabled: Boolean = false,
+    /** Feature 4: incoming calls from these numbers are rejected, never ring the iPhone. */
+    val blockedNumbers: Set<String> = emptySet(),
+    /** Feature 5: night window (minutes from midnight); incoming do not ring inside it. */
+    val nightModeEnabled: Boolean = false,
+    val nightStartMin: Int = 22 * 60,
+    val nightEndMin: Int = 7 * 60,
+    /** Feature 6: show the Infinix contact name for the caller in Linphone. */
+    val callerNameEnabled: Boolean = true,
+    /** Feature 7: auto-reply SMS to missed calls (costs credit). Default OFF. */
+    val autoReplyEnabled: Boolean = false,
+    val autoReplyText: String = "مشغول حاليًا، سأعاود الاتصال بك.",
+    /** Feature 8: allow remote gateway restart from the iPhone ("RESTART"). */
+    val remoteRestartEnabled: Boolean = true,
+    /** Feature 9: daily USSD balance check; email once a day when below the threshold. */
+    val lowBalanceAlertEnabled: Boolean = false,
+    val lowBalanceThresholdTnd: Double = 5.0,
+    /** Feature 10: turn the Wi-Fi hotspot back on if it switches off. */
+    val hotspotAutoRestartEnabled: Boolean = false,
+    /** Feature 11: allow the find-my-phone alarm from the iPhone ("FIND" / "FIND STOP"). */
+    val findPhoneEnabled: Boolean = true,
+    /** Feature 12: reject incoming calls with no caller ID. Default ON. */
+    val blockHiddenNumbers: Boolean = true,
 ) {
     val sipConfigured: Boolean get() =
         serverMode || (server.isNotBlank() && username.isNotBlank() && password.isNotEmpty())
@@ -151,6 +181,23 @@ class SettingsStore(context: Context) {
         smtpUser = prefs.getString("smtp_user", "")!!,
         smtpPassword = prefs.getString("smtp_password_sealed", null)?.let(::unseal).orEmpty(),
         emailRecipient = prefs.getString("email_recipient", "")!!,
+        smsCommandsEnabled = prefs.getBoolean("sms_commands_enabled", true),
+        ussdCommandsEnabled = prefs.getBoolean("ussd_commands_enabled", true),
+        ussdDefaultCode = prefs.getString("ussd_default_code", "*124#")!!.takeIf { it.isNotBlank() } ?: "*124#",
+        lowBatteryAlertEnabled = prefs.getBoolean("low_battery_alert_enabled", false),
+        blockedNumbers = prefs.getString("blocked_numbers", "")!!.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet(),
+        nightModeEnabled = prefs.getBoolean("night_mode_enabled", false),
+        nightStartMin = prefs.getInt("night_start_min", 22 * 60).mod(24 * 60),
+        nightEndMin = prefs.getInt("night_end_min", 7 * 60).mod(24 * 60),
+        callerNameEnabled = prefs.getBoolean("caller_name_enabled", true),
+        autoReplyEnabled = prefs.getBoolean("auto_reply_enabled", false),
+        autoReplyText = prefs.getString("auto_reply_text", "مشغول حاليًا، سأعاود الاتصال بك.")!!,
+        remoteRestartEnabled = prefs.getBoolean("remote_restart_enabled", true),
+        lowBalanceAlertEnabled = prefs.getBoolean("low_balance_alert_enabled", false),
+        lowBalanceThresholdTnd = prefs.getString("low_balance_threshold_tnd", "5.0")!!.toDoubleOrNull()?.takeIf { it >= 0 } ?: 5.0,
+        hotspotAutoRestartEnabled = prefs.getBoolean("hotspot_auto_restart_enabled", false),
+        findPhoneEnabled = prefs.getBoolean("find_phone_enabled", true),
+        blockHiddenNumbers = prefs.getBoolean("block_hidden_numbers", true),
     )
 
     fun save(s: GatewaySettings) {
@@ -189,6 +236,23 @@ class SettingsStore(context: Context) {
             .putString("smtp_user", s.smtpUser.trim())
             .putString("smtp_password_sealed", seal(s.smtpPassword))
             .putString("email_recipient", s.emailRecipient.trim())
+            .putBoolean("sms_commands_enabled", s.smsCommandsEnabled)
+            .putBoolean("ussd_commands_enabled", s.ussdCommandsEnabled)
+            .putString("ussd_default_code", s.ussdDefaultCode.trim())
+            .putBoolean("low_battery_alert_enabled", s.lowBatteryAlertEnabled)
+            .putString("blocked_numbers", s.blockedNumbers.joinToString(","))
+            .putBoolean("night_mode_enabled", s.nightModeEnabled)
+            .putInt("night_start_min", s.nightStartMin)
+            .putInt("night_end_min", s.nightEndMin)
+            .putBoolean("caller_name_enabled", s.callerNameEnabled)
+            .putBoolean("auto_reply_enabled", s.autoReplyEnabled)
+            .putString("auto_reply_text", s.autoReplyText)
+            .putBoolean("remote_restart_enabled", s.remoteRestartEnabled)
+            .putBoolean("low_balance_alert_enabled", s.lowBalanceAlertEnabled)
+            .putString("low_balance_threshold_tnd", s.lowBalanceThresholdTnd.toString())
+            .putBoolean("hotspot_auto_restart_enabled", s.hotspotAutoRestartEnabled)
+            .putBoolean("find_phone_enabled", s.findPhoneEnabled)
+            .putBoolean("block_hidden_numbers", s.blockHiddenNumbers)
             .apply()
     }
 
