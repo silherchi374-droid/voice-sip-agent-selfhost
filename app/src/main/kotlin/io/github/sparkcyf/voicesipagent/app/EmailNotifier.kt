@@ -25,6 +25,8 @@ import javax.mail.internet.MimeMessage
  * - SMS:         `[VSA Gateway] SMS from <number>`
  * - IP change:   `[VSA Gateway] New IP: <ip>`
  * - test:        `[VSA Gateway] Test email`
+ * - low battery: `[VSA Gateway] Low battery: <pct>%` (side-menu feature 3)
+ * - low balance: `[VSA Gateway] Low balance: <amount>` (side-menu feature 9)
  */
 data class EmailConfig(
     val host: String,
@@ -44,6 +46,11 @@ object EmailSubjects {
         "[VSA Gateway] SMS from ${from?.ifBlank { null } ?: "unknown number"}"
 
     fun newIp(ip: String): String = "[VSA Gateway] New IP: $ip"
+
+    fun lowBattery(pct: Int): String = "[VSA Gateway] Low battery: $pct%"
+
+    /** [amount] is the parsed balance formatted with up to 3 decimals, e.g. "4.5" or "12.500". */
+    fun lowBalance(amount: String): String = "[VSA Gateway] Low balance: $amount"
 
     const val TEST = "[VSA Gateway] Test email"
 }
@@ -85,6 +92,21 @@ object EmailBodies {
             appendLine()
             append("Update Linphone (account 101) to this address if the iPhone connects directly.")
         }
+    }
+
+    fun lowBattery(pct: Int, timeMs: Long, charging: Boolean): String = buildString {
+        appendLine("The Infinix gateway battery is low: $pct%.")
+        appendLine("Time: ${formatTime(timeMs)}")
+        appendLine("Charging: ${if (charging) "yes" else "no"}")
+        appendLine()
+        append("Plug the Infinix in — when its battery dies, calls stop reaching the iPhone.")
+    }
+
+    fun lowBalance(amountTnd: Double, timeMs: Long): String = buildString {
+        appendLine("The gateway SIM balance is low: ${"%.3f".format(Locale.US, amountTnd)} TND.")
+        appendLine("Time: ${formatTime(timeMs)}")
+        appendLine()
+        append("Top up the SIM so outgoing calls and SMS keep working.")
     }
 
     const val TEST_BODY =
