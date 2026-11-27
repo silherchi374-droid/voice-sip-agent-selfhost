@@ -59,6 +59,10 @@ android {
     }
     packaging {
         resources.excludes += "META-INF/*.kotlin_module"
+        // android-mail and android-activation (JavaMail) both ship these files;
+        // mergeDebugJavaResource fails on the duplicates — exclude them.
+        resources.excludes += "META-INF/NOTICE.md"
+        resources.excludes += "META-INF/LICENSE.md"
     }
 }
 
