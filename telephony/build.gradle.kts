@@ -14,6 +14,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    // Unit tests run on the JVM against android.jar stubs: any real Android
+    // framework call (e.g. `object : Call.Callback()`) throws "Stub!". Return
+    // default values instead, so the mocked-Android tests can run.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
