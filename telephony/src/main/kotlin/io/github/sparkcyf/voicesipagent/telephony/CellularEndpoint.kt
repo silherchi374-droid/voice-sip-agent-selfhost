@@ -312,6 +312,9 @@ class CellularEndpoint(
         return mute.acquire(leg, svc)
     }
 
+    /** Re-apply the zero voice-call volume for an owned leg (see [VoiceCallSilencer.reassert]). */
+    internal fun resilence() = silencer.reassert()
+
     internal fun releaseMute(leg: CellularLeg) {
         mute.release(leg)
     }
