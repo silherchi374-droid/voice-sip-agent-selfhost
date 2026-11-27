@@ -1,9 +1,12 @@
 package io.github.sparkcyf.voicesipagent.app
 
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
+import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Build
 import android.telecom.TelecomManager
@@ -13,6 +16,7 @@ import android.app.role.RoleManager
 import android.Manifest
 import io.github.sparkcyf.voicesipagent.gateway.BridgeSession
 import io.github.sparkcyf.voicesipagent.gateway.CallBridge
+import io.github.sparkcyf.voicesipagent.gateway.CallPolicy
 import io.github.sparkcyf.voicesipagent.gateway.EchoEndpoint
 import io.github.sparkcyf.voicesipagent.gateway.GatewayConfig
 import io.github.sparkcyf.voicesipagent.privileged.HealthKeys
@@ -25,9 +29,19 @@ import io.github.sparkcyf.voicesipagent.sip.SipAccount
 import io.github.sparkcyf.voicesipagent.sip.SipConfig
 import io.github.sparkcyf.voicesipagent.sip.SipLog
 import io.github.sparkcyf.voicesipagent.sip.SipUserAgent
+import io.github.sparkcyf.voicesipagent.telephony.AndroidSmsTransport
+import io.github.sparkcyf.voicesipagent.telephony.AndroidUssdTransport
 import io.github.sparkcyf.voicesipagent.telephony.CellularEndpoint
 import io.github.sparkcyf.voicesipagent.telephony.CallSnapshot
 import io.github.sparkcyf.voicesipagent.telephony.GatewayInCallService
+import io.github.sparkcyf.voicesipagent.telephony.SmsSender
+import io.github.sparkcyf.voicesipagent.telephony.SystemSimSlots
+import io.github.sparkcyf.voicesipagent.telephony.UssdBalanceParser
+import io.github.sparkcyf.voicesipagent.telephony.UssdRunner
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 import io.github.sparkcyf.voicesipagent.voice.CallEndpoint
 import io.github.sparkcyf.voicesipagent.voice.EndpointStatus
 import io.github.sparkcyf.voicesipagent.voice.HangupCause
@@ -134,6 +148,21 @@ class GatewayRuntime private constructor(context: Context) {
     private val recordedSessions = HashSet<Int>()
     /** Last mobile IP an IP-change email was sent for; null until the first observation. */
     private var lastNotifiedIp: String? = recordsStore.getString("last_notified_ip")
+    // ---- Side-menu features (12 new, 2026-11-27) ----
+    private val simSlots = SystemSimSlots(app)
+    private val smsSender = SmsSender(simSlots, AndroidSmsTransport(app))
+    private val ussdRunner = UssdRunner(AndroidUssdTransport(app))
+    private val contactLookup = ContactLookup(app)
+    private val findPhoneAlarm = FindPhoneAlarm(app)
+    private val hotspotWatch = HotspotWatch(app, { shizuku.service }, { settings.hotspotAutoRestartEnabled })
+    /** Low-battery alert state: true once the <20% email went out; re-arms above 25% / on charger. */
+    private var lowBatteryAlerted = false
+    /** Day (yyyy-MM-dd) of the last automatic balance check; at most one USSD check per day. */
+    private var lastBalanceCheckDay: String? = recordsStore.getString("low_balance_check_day")
+    /** Day (yyyy-MM-dd) a low-balance email was sent; at most one alert per day. */
+    private var lowBalanceAlertDay: String? = recordsStore.getString("low_balance_alert_day")
+    /** A RESTART command arrived; confirm it once the phone re-registers after the restart. */
+    private var restartConfirmPending: Boolean = recordsStore.getString("restart_confirm_pending") == "1"
     /** Built-in SIP user agent. */
     private var sip: CallEndpoint? = null
     private var bridge: CallBridge? = null
@@ -273,6 +302,7 @@ class GatewayRuntime private constructor(context: Context) {
         worker.allowCoreThreadTimeOut(false)
         shizuku.start()
         watchNetwork()
+        hotspotWatch.start()
         // Telecom or Shizuku restarts can disrupt call access. Recheck health and repair companion
         // setup while idle if access is unavailable; a missing override alone does not trigger setup.
         healthCheck = worker.scheduleWithFixedDelay(::periodicCheck, 60, 60, TimeUnit.SECONDS)
@@ -283,6 +313,7 @@ class GatewayRuntime private constructor(context: Context) {
         healthCheck = null
         dialerRetry?.cancel(false)
         dialerRetry = null
+        hotspotWatch.stop()
         val callback = networkCallback
         networkCallback = null
         if (callback != null) runCatching {
@@ -330,6 +361,10 @@ class GatewayRuntime private constructor(context: Context) {
             AppLog.w("health check failed", e)
         }
         _health.update { it.copy(inCallServiceBound = CellularEndpoint.isInCallServiceBound) }
+        // Side-menu features 3 and 9: low-battery email (once per drop) and the daily
+        // automatic balance check. Both fail silently when email is not configured.
+        checkBattery()
+        checkBalanceDaily()
     }
 
     private fun applyHealthBundle(b: Bundle) {
@@ -578,8 +613,12 @@ class GatewayRuntime private constructor(context: Context) {
                 sipLog,
             ).also { ua ->
                 ua.addStatusListener { ep, st -> sipStatus(ep, st) }
-                // The softphone (re-)registered: deliver queued missed calls as SIP MESSAGEs.
-                ua.onPeerRegistered = { worker.execute { flushMissedCalls() } }
+                // The softphone (re-)registered: deliver queued missed calls as SIP MESSAGEs,
+                // and confirm a pending remote RESTART once the phone is back.
+                ua.onPeerRegistered = { worker.execute { flushMissedCalls(); confirmRestartIfPending() } }
+                // Remote commands from the registered phone (SMS, USSD, RESTART, FIND). The UA
+                // already enforced digest auth + registered-sender before this is called.
+                ua.onSipMessage = { _, body -> worker.execute { handleSipCommand(body) } }
                 ua.start()
             }
             sip = ep
@@ -667,6 +706,16 @@ class GatewayRuntime private constructor(context: Context) {
             ),
             dialPolicyForA = { n -> if (cellular.isEmergencyNumber(n)) HangupCause.FORBIDDEN else null },
             log = { AppLog.i("bridge: $it") },
+            // Side-menu features 4, 5, 12: screen inbound cellular calls before dialing the
+            // phone; a vetoed call is recorded as missed (call log + email + auto-reply).
+            inboundVeto = { leg -> if (leg.kind == "cellular") inboundVetoFor(leg.remote.number) else null },
+            onInboundVetoed = { leg, cause -> worker.execute { recordVetoedCall(leg.remote.number, cause) } },
+            // Side-menu feature 6: show the Infinix contact name in Linphone.
+            callerDisplayName = { number ->
+                if (settings.callerNameEnabled &&
+                    app.checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+                ) contactLookup.nameFor(number) else null
+            },
         )
         b.addListener { session ->
             val description = describe(session)
@@ -836,6 +885,7 @@ class GatewayRuntime private constructor(context: Context) {
                 val missed = MissedCall(inbound.remote.number, endedAt, inbound.line)
                 missedCallStore.add(missed)
                 notifyMissedCall(missed)
+                maybeAutoReply(missed)
             }
         } else {
             val out = s.outbound
@@ -860,6 +910,208 @@ class GatewayRuntime private constructor(context: Context) {
             EmailBodies.missedCall(missed.number, missed.timeMs, missed.slot),
         )
     }
+
+    // ------------------------------------------------------------ side-menu features
+
+    /**
+     * Call screening for inbound cellular calls (features 4, 5, 12). Returns the hangup cause
+     * when the call must be rejected, null when it may ring the phone. Order matters: a hidden
+     * number is rejected even before the blocklist is consulted.
+     */
+    private fun inboundVetoFor(number: String?): HangupCause? {
+        val s = settings
+        if (s.blockHiddenNumbers && CallPolicy.isHidden(number)) return HangupCause.FORBIDDEN
+        if (CallPolicy.isBlocked(number, s.blockedNumbers)) return HangupCause.FORBIDDEN
+        if (s.nightModeEnabled) {
+            val now = Calendar.getInstance()
+            val nowMin = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
+            if (CallPolicy.isNightNow(nowMin, s.nightStartMin, s.nightEndMin)) return HangupCause.FORBIDDEN
+        }
+        return null
+    }
+
+    /** A vetoed call never created a bridge session, so it is recorded as missed here. */
+    private fun recordVetoedCall(number: String?, cause: HangupCause) {
+        val now = System.currentTimeMillis()
+        _callLog.value = callLogStore.add(CallLogEntry(
+            direction = CallDirection.INCOMING,
+            number = number,
+            timeMs = now,
+            slot = null,
+            durationSec = null,
+            outcome = CallOutcome.MISSED,
+        ))
+        val missed = MissedCall(number, now, null)
+        missedCallStore.add(missed)
+        notifyMissedCall(missed)
+        maybeAutoReply(missed)
+        AppLog.i("incoming call from ${redactNumber(number)} rejected by call policy ($cause)")
+    }
+
+    /** Feature 7: text a missed caller the configured message (costs credit; default OFF). */
+    private fun maybeAutoReply(missed: MissedCall) {
+        val s = settings
+        if (!s.autoReplyEnabled) return
+        val number = missed.number ?: return
+        if (s.autoReplyText.isBlank()) return
+        val slot = missed.slot ?: s.defaultSimSlot.takeIf { it >= 0 }
+        when (val r = smsSender.send(number, s.autoReplyText, slot = slot)) {
+            is SmsSender.Result.Sent -> AppLog.i("auto-reply SMS sent to ${redactNumber(number)}")
+            is SmsSender.Result.Failed -> AppLog.w("auto-reply SMS failed: ${r.reason}")
+        }
+    }
+
+    /**
+     * Handles one remote command from the registered phone (features 1, 2, 8, 11). Runs on the
+     * worker thread. Every outcome is answered back to the phone as a SIP MESSAGE so the user
+     * sees what happened; a reply that finds no phone registered is only logged.
+     */
+    private fun handleSipCommand(body: String) {
+        val ua = sip as? SipUserAgent ?: return
+        fun reply(text: String) {
+            if (!ua.sendMessage("gateway", text)) AppLog.w("command reply not delivered: no phone registered")
+        }
+        when (val cmd = SipCommandParser.parse(body)) {
+            null -> reply(SipCommandParser.USAGE)
+            is SipCommand.SendSms -> {
+                if (!settings.smsCommandsEnabled) {
+                    reply("SMS commands are off (side menu → SMS from iPhone).")
+                    return
+                }
+                when (val r = smsSender.send(cmd.destination, cmd.text)) {
+                    is SmsSender.Result.Sent -> reply("SMS sent to ${cmd.destination}.")
+                    is SmsSender.Result.Failed -> reply("SMS failed: ${r.reason}")
+                }
+            }
+            is SipCommand.RunUssd -> {
+                if (!settings.ussdCommandsEnabled) {
+                    reply("USSD commands are off (side menu → USSD balance check).")
+                    return
+                }
+                val code = cmd.code ?: settings.ussdDefaultCode
+                ussdRunner.run(code) { result ->
+                    worker.execute {
+                        when (result) {
+                            is UssdRunner.Result.Success -> reply("USSD $code:\n${result.response}")
+                            is UssdRunner.Result.Failed -> reply("USSD $code failed: ${result.reason}")
+                        }
+                    }
+                }
+            }
+            is SipCommand.Restart -> {
+                if (!settings.remoteRestartEnabled) {
+                    reply("Remote restart is off (side menu → Remote restart).")
+                    return
+                }
+                restartConfirmPending = true
+                recordsStore.putString("restart_confirm_pending", "1")
+                AppLog.i("remote RESTART command: restarting SIP stack")
+                restartSip()
+            }
+            is SipCommand.FindPhone -> {
+                if (!settings.findPhoneEnabled) {
+                    reply("Find-my-phone is off (side menu → Find my Infinix).")
+                    return
+                }
+                if (cmd.stop) {
+                    findPhoneAlarm.stop()
+                    reply("Alarm stopped.")
+                } else {
+                    findPhoneAlarm.start()
+                    reply("Ringing the Infinix at full volume (30 s max). Send FIND STOP to silence it.")
+                }
+            }
+        }
+    }
+
+    /** Confirms a remote RESTART once the phone re-registers after the restart. */
+    private fun confirmRestartIfPending() {
+        if (!restartConfirmPending) return
+        val ua = sip as? SipUserAgent ?: return
+        if (ua.sendMessage("gateway", "Gateway restarted.")) {
+            restartConfirmPending = false
+            recordsStore.putString("restart_confirm_pending", "")
+        } else {
+            AppLog.w("restart confirmation not delivered; will retry on the next registration")
+        }
+    }
+
+    /** Feature 3: email once when the battery drops below 20%; re-arm above 25% / on charger. */
+    private fun checkBattery() {
+        val s = settings
+        if (!s.lowBatteryAlertEnabled) return
+        val battery = app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return
+        val level = battery.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = battery.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        if (level < 0 || scale <= 0) return
+        val pct = level * 100 / scale
+        val status = battery.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+            status == BatteryManager.BATTERY_STATUS_FULL
+        if (pct < 20 && !lowBatteryAlerted) {
+            lowBatteryAlerted = true
+            val config = EmailNotifier.configFrom(s)
+            if (config == null) {
+                AppLog.w("low-battery alert skipped: email not configured")
+                return
+            }
+            emailNotifier.send(
+                config,
+                EmailSubjects.lowBattery(pct),
+                EmailBodies.lowBattery(pct, System.currentTimeMillis(), charging),
+            )
+            AppLog.i("low-battery email sent ($pct%)")
+        } else if (pct > 25 || charging) {
+            lowBatteryAlerted = false
+        }
+    }
+
+    /**
+     * Feature 9: automatic daily balance check via USSD. At most one check per day; at most
+     * one low-balance email per day. An unparseable reply is logged and never alerts.
+     */
+    private fun checkBalanceDaily() {
+        val s = settings
+        if (!s.lowBalanceAlertEnabled) return
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        if (lastBalanceCheckDay == today) return
+        lastBalanceCheckDay = today
+        recordsStore.putString("low_balance_check_day", today)
+        ussdRunner.run(s.ussdDefaultCode) { result ->
+            worker.execute {
+                when (result) {
+                    is UssdRunner.Result.Success -> {
+                        val amount = UssdBalanceParser.parseAmountTnd(result.response)
+                        if (amount == null) {
+                            AppLog.w("daily balance check: could not parse USSD reply: ${result.response.take(120)}")
+                            return@execute
+                        }
+                        val threshold = settings.lowBalanceThresholdTnd
+                        if (amount < threshold && lowBalanceAlertDay != today) {
+                            lowBalanceAlertDay = today
+                            recordsStore.putString("low_balance_alert_day", today)
+                            val config = EmailNotifier.configFrom(settings)
+                            if (config == null) {
+                                AppLog.w("low-balance alert skipped: email not configured")
+                                return@execute
+                            }
+                            val amountText = "%.3f".format(Locale.US, amount).trimEnd('0').trimEnd('.')
+                            emailNotifier.send(
+                                config,
+                                EmailSubjects.lowBalance(amountText),
+                                EmailBodies.lowBalance(amount, System.currentTimeMillis()),
+                            )
+                            AppLog.i("low-balance email sent ($amount TND)")
+                        }
+                    }
+                    is UssdRunner.Result.Failed -> AppLog.w("daily balance check failed: ${result.reason}")
+                }
+            }
+        }
+    }
+
+    /** Stops the find-my-phone alarm (notification action / FIND STOP). */
+    fun stopFindPhoneAlarm() = worker.execute { findPhoneAlarm.stop() }
 
     /**
      * Delivers queued missed calls to the freshly registered softphone as SIP MESSAGEs
