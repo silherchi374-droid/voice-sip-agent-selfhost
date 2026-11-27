@@ -260,4 +260,61 @@ class CallBridgeTest {
         assertEquals(HangupCause.INTERNAL_ERROR, b.endCause)
         assertNull(cellPort.clock)
     }
+
+    @Test
+    fun inboundVetoRejectsBeforeDialing() {
+        val vetoed = mutableListOf<Pair<String?, HangupCause>>()
+        bridge.stop()
+        bridge = CallBridge(
+            sideA = cell,
+            sideB = sip,
+            routeAtoB = { "302" },
+            routeBtoA = { it.target },
+            config = GatewayConfig(cellularInboundTarget = "302"),
+            inboundVeto = { leg -> if (leg.kind == "cellular") HangupCause.FORBIDDEN else null },
+            onInboundVetoed = { leg, cause -> vetoed += leg.remote.number to cause },
+        )
+        bridge.start()
+        val a = cell.incoming("13800001234"); settle()
+        assertEquals(HangupCause.FORBIDDEN, a.endCause)
+        assertTrue("vetoed call must never be dialed", sip.dialed.isEmpty())
+        assertEquals(listOf("13800001234" to HangupCause.FORBIDDEN), vetoed)
+        assertNull(bridge.session)
+    }
+
+    @Test
+    fun inboundVetoDoesNotApplyToSipSide() {
+        bridge.stop()
+        bridge = CallBridge(
+            sideA = cell,
+            sideB = sip,
+            routeAtoB = { "302" },
+            routeBtoA = { it.target },
+            config = GatewayConfig(cellularInboundTarget = "302"),
+            inboundVeto = { leg -> if (leg.kind == "cellular") HangupCause.FORBIDDEN else null },
+        )
+        bridge.start()
+        sip.incoming("302", target = "13800005678"); settle()
+        assertEquals(1, cell.dialed.size)
+    }
+
+    @Test
+    fun callerDisplayNameIsResolvedForOutboundDial() {
+        bridge.stop()
+        bridge = CallBridge(
+            sideA = cell,
+            sideB = sip,
+            routeAtoB = { "302" },
+            routeBtoA = { it.target },
+            config = GatewayConfig(cellularInboundTarget = "302"),
+            callerDisplayName = { number -> if (number == "13800001234") "Alice" else null },
+        )
+        bridge.start()
+        cell.incoming("13800001234"); settle()
+        val b = sip.dialed.single()
+        assertEquals("302", b.remote.number) // the outbound leg's remote is the dial target
+        val caller = sip.callers.single()
+        assertEquals("Alice", caller.displayName)
+        assertEquals("13800001234", caller.number)
+    }
 }
