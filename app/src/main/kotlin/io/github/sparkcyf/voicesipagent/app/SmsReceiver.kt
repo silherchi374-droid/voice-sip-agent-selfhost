@@ -22,7 +22,7 @@ class SmsReceiver : BroadcastReceiver() {
         // Which SIM received it, for the SMS->email body ("which SIM") and the call log.
         val subId = intent.getIntExtra(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX, -1)
         val slot = if (subId >= 0) runCatching {
-            SubscriptionManager.from(context).getSlotIndex(subId)
+            SubscriptionManager.getSlotIndex(subId)
         }.getOrNull()?.takeIf { it >= 0 } else null
         AppLog.i("SMS received; relaying to the registered phone")
         GatewayRuntime.get(context).forwardSms(from, body, slot)
