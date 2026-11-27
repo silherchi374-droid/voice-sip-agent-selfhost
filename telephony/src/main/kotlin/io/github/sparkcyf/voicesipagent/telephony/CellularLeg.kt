@@ -67,7 +67,14 @@ class CellularLeg internal constructor(
         if (stopping) return
         when (s) {
             Call.STATE_NEW, Call.STATE_CONNECTING, Call.STATE_DIALING, Call.STATE_RINGING,
-            Call.STATE_SELECT_PHONE_ACCOUNT, Call.STATE_PULLING_CALL -> transition(LegState.PROCEEDING)
+            Call.STATE_SELECT_PHONE_ACCOUNT, Call.STATE_PULLING_CALL -> {
+                transition(LegState.PROCEEDING)
+                // The voice-call volume set at placement can be undone as the call starts
+                // ringing (audio mode/route change), so the ringback leaks onto the handset.
+                // Re-assert it on every pre-answer transition; the privileged tap mute takes
+                // over once the call is answered.
+                endpoint.resilence()
+            }
             Call.STATE_ACTIVE -> {
                 if (direction == LegDirection.INBOUND && !answerRequested && state < LegState.CONNECTED) {
                     // Answered on the phone itself: leave the call to the user with a live microphone
@@ -78,6 +85,8 @@ class CellularLeg internal constructor(
                 }
                 if (transition(LegState.CONNECTED)) {
                     endpoint.log("cell $id active")
+                    // Cover the window before the audio tap (and its privileged mute) engages.
+                    endpoint.resilence()
                     startAudio()
                 } else if (held && !gatewayHoldRequested) {
                     // Resumed after a gateway-requested hold: the audio tap does not reliably
