@@ -49,6 +49,26 @@ class VoiceCallSilencerTest {
         assertEquals(emptyList<Int>(), v.sets)
     }
 
+    @Test fun reassertSilencesAgainAfterSystemRaise() {
+        val v = FakeVolume(5)
+        val s = VoiceCallSilencer(v)
+        s.acquire()
+        assertEquals(0, v.level)
+        v.level = 4 // the system raised the voice-call volume again as the call started ringing
+        s.reassert()
+        assertEquals("ringback must stay silenced while the call is ringing", 0, v.level)
+        s.release()
+        assertEquals(5, v.level)
+    }
+
+    @Test fun reassertWithoutAcquireIsNoop() {
+        val v = FakeVolume(6)
+        val s = VoiceCallSilencer(v)
+        s.reassert()
+        assertEquals(6, v.level)
+        assertEquals(emptyList<Int>(), v.sets)
+    }
+
     @Test fun restoreResetsEvenWhenRefCountIsOff() {
         val v = FakeVolume(7)
         val s = VoiceCallSilencer(v)
