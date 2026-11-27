@@ -65,6 +65,20 @@ class CallBridge(
     private val config: GatewayConfig,
     private val dialPolicyForA: DialPolicy = DialPolicy { null },
     private val log: (String) -> Unit = {},
+    /**
+     * Screening for inbound legs (blocklist, night mode, hidden numbers). Consulted for every
+     * inbound leg before dialing the other side; the lambda decides by leg kind. Returning a
+     * cause vetoes the call: the leg is hung up and [onInboundVetoed] is notified so the caller
+     * can record it as a missed call. Null = no screening.
+     */
+    private val inboundVeto: ((CallLeg) -> HangupCause?)? = null,
+    private val onInboundVetoed: ((CallLeg, HangupCause) -> Unit)? = null,
+    /**
+     * Optional display-name lookup for the inbound caller's number (e.g. from the phone's
+     * contacts). The result replaces the leg's display name when dialing the other side, so
+     * the softphone shows the name. Null = pass the leg's own display name through.
+     */
+    private val callerDisplayName: ((String?) -> String?)? = null,
 ) {
     private val executor: ScheduledExecutorService =
         ScheduledThreadPoolExecutor(1) { r -> Thread(r, "call-bridge").apply { isDaemon = true } }.apply {
@@ -142,6 +156,12 @@ class CallBridge(
             leg.hangup(HangupCause.NOT_FOUND)
             return
         }
+        inboundVeto?.invoke(leg)?.let { cause ->
+            log("inbound ${from.name} call from ${redactNumber(leg.remote.number)} vetoed: $cause")
+            onInboundVetoed?.invoke(leg, cause)
+            leg.hangup(cause)
+            return
+        }
         if (to === sideA) {
             val veto = dialPolicyForA.check(target)
                 ?: if (config.allowedDialPrefixes.isNotEmpty() && config.allowedDialPrefixes.none(target::startsWith)) HangupCause.FORBIDDEN else null
@@ -155,7 +175,11 @@ class CallBridge(
         session = s
         leg.addListener(LegWatcher(s, inbound = true))
         log("$s: ${from.name} ${redactNumber(leg.remote.number)} -> ${to.name} ${redactNumber(target)}")
-        val out = to.dial(target, leg.remote, leg.line)
+        val caller = leg.remote.let { party ->
+            callerDisplayName?.invoke(party.number)?.takeIf { it.isNotBlank() }
+                ?.let { party.copy(displayName = it) } ?: party
+        }
+        val out = to.dial(target, caller, leg.line)
         s.outbound = out
         out.addListener(LegWatcher(s, inbound = false))
         s.answerTimer = executor.schedule({
