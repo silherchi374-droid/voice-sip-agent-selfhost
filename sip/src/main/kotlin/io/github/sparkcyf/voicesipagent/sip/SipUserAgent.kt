@@ -82,6 +82,13 @@ class SipUserAgent(
     private var peerExpiry: ScheduledFuture<*>? = null
     /** Called (on the UA thread) when a softphone registers in server mode. */
     @Volatile var onPeerRegistered: (() -> Unit)? = null
+    /**
+     * Called (on the UA thread) when an authenticated out-of-dialog SIP MESSAGE arrives from the
+     * registered phone (remote commands from the iPhone: SMS, USSD, RESTART, FIND). Never invoked
+     * for unauthenticated or unregistered senders — commands that cost money or disrupt service
+     * must not be triggerable by anyone who can reach the SIP port.
+     */
+    @Volatile var onSipMessage: ((from: InetSocketAddress, body: String) -> Unit)? = null
     /** Full SIP URI (sip:user@ip:port) to reach the registered phone, or null if none. */
     internal fun serverPeerUri(): String? = peerContactUri
     /** Domain to use in locally generated URIs (our LAN IP when no account domain is set). */
@@ -170,6 +177,48 @@ class SipUserAgent(
             log.info("SMS from ${redactNumber(fromNumber)} relayed to phone")
         }
         return true
+    }
+
+    /**
+     * Sends an out-of-dialog MESSAGE to [uri] as this account, retrying once with digest auth
+     * on a 401/407 (same pattern as REGISTER). [onDone] receives the final response code, or
+     * null on timeout. Used by the remote-command tests; in production the phone is a Linphone
+     * client, and the gateway is the server side (see [onSipMessage]).
+     */
+    fun sendMessageTo(uri: String, text: String, onDone: ((Int?) -> Unit)? = null) {
+        post { sendMessageTo(uri, text, auth = null, authAttempts = 0, onDone) }
+    }
+
+    private fun sendMessageTo(
+        uri: String,
+        text: String,
+        auth: Pair<String, String>?,
+        authAttempts: Int,
+        onDone: ((Int?) -> Unit)?,
+    ) {
+        val req = newRequest(
+            method = "MESSAGE",
+            uri = uri,
+            from = NameAddr(account.displayName, aor).withTag(newTag()),
+            to = NameAddr(null, uri),
+            callId = newCallId(),
+            cseq = ++regCseq,
+        )
+        auth?.let { req.headers.add(it.first, it.second) }
+        req.headers.add("Content-Type", "text/plain;charset=UTF-8")
+        req.body = text.toByteArray(Charsets.UTF_8)
+        sendClient(req) { r ->
+            when {
+                r == null -> onDone?.invoke(null)
+                r.isProvisional -> Unit
+                (r.code == 401 || r.code == 407) && authAttempts < 2 -> {
+                    val authHeader = authorizationFor(r, "MESSAGE", uri)
+                    if (authHeader == null) onDone?.invoke(r.code)
+                    else sendMessageTo(uri, text, authHeader, authAttempts + 1, onDone)
+                }
+                else -> onDone?.invoke(r.code)
+            }
+        }
     }
 
     // ---------------------------------------------------------------- registration
@@ -322,6 +371,7 @@ class SipUserAgent(
             req.method == "INVITE" -> onNewInvite(req, tx, from)
             req.method == "OPTIONS" -> tx.respond(buildResponse(req, 200, toTag = newTag()).also { addCapabilities(it) })
             req.method == "NOTIFY" -> tx.respond(buildResponse(req, 200, toTag = newTag()))
+            req.method == "MESSAGE" -> onSipMessageRequest(req, tx, from)
             req.method == "BYE" || req.method == "INFO" || req.method == "UPDATE" -> tx.respond(buildResponse(req, 481))
             else -> tx.respond(buildResponse(req, 405).also { addCapabilities(it) })
         }
@@ -359,6 +409,50 @@ class SipUserAgent(
         if (!call.acceptOffer(req, tx)) return
         calls[call.callId] = call
         handler.onIncomingCall(call)
+    }
+
+    /**
+     * Out-of-dialog MESSAGE in server mode: a remote command from the registered phone
+     * (SMS, USSD, RESTART, FIND). Security, in order:
+     *  1. Only in server mode — a client UA never accepts commands.
+     *  2. A registrar password must be set (fail closed, like INVITE).
+     *  3. Digest auth against that password, with the 401 challenge first so a legitimate
+     *     phone can answer it (same [digestCheck] as INVITE/REGISTER, incl. brute-force ban).
+     *  4. The sender's From user must be the currently registered phone ([peerAor]) — a
+     *     credentialed but different extension (or a stale registration) cannot command us.
+     * Only then is the body handed to [onSipMessage]. The 200 is sent before dispatch so a
+     * slow command cannot cause a retransmit storm.
+     */
+    private fun onSipMessageRequest(req: SipRequest, tx: ServerTransaction, from: InetSocketAddress) {
+        val ip = from.address?.hostAddress ?: ""
+        if (!config.serverMode) {
+            tx.respond(buildResponse(req, 405).also { addCapabilities(it) })
+            return
+        }
+        if (config.registrarPassword.isEmpty()) {
+            tx.respond(buildResponse(req, 403, toTag = newTag()))
+            log.warn("MESSAGE from $ip refused: set a registrar password to allow remote commands")
+            return
+        }
+        when (val o = digestCheck(req, ip, "MESSAGE")) {
+            AuthOutcome.PASS -> Unit
+            AuthOutcome.DROP -> { tx.respond(buildResponse(req, 403, toTag = newTag())); return }
+            is AuthOutcome.Challenge -> {
+                val resp = buildResponse(req, 401, toTag = newTag())
+                resp.headers.add("WWW-Authenticate", DigestAuth.challengeHeader(config.registrarRealm, o.nonce))
+                tx.respond(resp)
+                return
+            }
+        }
+        val sender = req.from?.sipUri?.user
+        if (peerAor == null || sender != peerAor) {
+            tx.respond(buildResponse(req, 403, toTag = newTag()))
+            log.warn("MESSAGE from $ip refused: sender '${redactNumber(sender)}' is not the registered phone")
+            return
+        }
+        tx.respond(buildResponse(req, 200, toTag = newTag()))
+        log.info("command MESSAGE from ${redactNumber(sender)}: ${req.bodyText.take(80)}")
+        onSipMessage?.invoke(from, req.bodyText)
     }
 
     // Registrar auth tuning: how long an issued nonce is accepted, and the brute-force ban policy.
@@ -667,7 +761,7 @@ class SipUserAgent(
     }
 
     companion object {
-        const val ALLOW = "INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, NOTIFY, UPDATE"
+        const val ALLOW = "INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, NOTIFY, UPDATE, MESSAGE"
 
         /** Request header selecting the cellular SIM slot for an outbound call (dual-SIM). */
         const val LINE_HEADER = "X-VSA-SIMSLOT"
