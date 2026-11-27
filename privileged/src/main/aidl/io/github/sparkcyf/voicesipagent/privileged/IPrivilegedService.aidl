@@ -54,4 +54,12 @@ interface IPrivilegedService {
 
     /** Explicit restoration; only changes the role while this app still holds it. */
     Bundle restoreDefaultDialer(String previousHolder) = 11;
+
+    /**
+     * Starts Wi-Fi tethering with the saved SoftApConfiguration (`cmd wifi start-softap` with no
+     * arguments). Used by the hotspot auto-restart feature when the hotspot switches off.
+     * Returns "" on success, else an error message. No arguments by design: the caller must
+     * never be able to reconfigure the hotspot (SSID/password) through this service.
+     */
+    String startTethering() = 12;
 }
