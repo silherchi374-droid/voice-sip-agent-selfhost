@@ -43,6 +43,19 @@ class VoiceCallSilencer(private val volume: VolumeControl) {
         }
     }
 
+    /**
+     * Re-apply the zero volume while a gateway call is in progress. The single set at
+     * acquire() time can be undone before the call is answered: the system re-applies the
+     * stored in-call volume when the audio mode/route changes as the call starts ringing,
+     * so the ringback leaks onto the handset. Re-asserting on every pre-answer state change
+     * (and once on answer, before the privileged tap mute engages) keeps the handset silent
+     * until the call is answered. No-op when nothing is silenced. The volume is only
+     * restored by [release]/[restore], never here.
+     */
+    fun reassert() {
+        if (refCount > 0) volume.set(0)
+    }
+
     /** One owned call ended; restore the previous volume when none remain. */
     fun release() {
         if (refCount <= 0) return
