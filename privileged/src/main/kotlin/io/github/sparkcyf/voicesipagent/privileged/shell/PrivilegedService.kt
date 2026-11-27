@@ -86,6 +86,12 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
 
     override fun restoreDefaultDialer(previousHolder: String): Bundle = dialerOperation { dialerRoles.restore(previousHolder) }
 
+    override fun startTethering(): String {
+        enforceCaller()
+        val r = ShellEnv.run("cmd", "wifi", "start-softap")
+        return if (r.exit == 0) "" else "cmd wifi start-softap failed (exit ${r.exit}): ${r.out.trim().take(200)}"
+    }
+
     private fun dialerOperation(operation: () -> DialerRoleResult): Bundle {
         enforceCaller()
         return asHelper {
