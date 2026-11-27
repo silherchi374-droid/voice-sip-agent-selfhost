@@ -61,6 +61,10 @@ class CellularOwnershipTest {
         val account = mock(PhoneAccount::class.java)
         doReturn(true).`when`(account).hasCapabilities(PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION)
         doReturn(account).`when`(telecom).getPhoneAccount(any(PhoneAccountHandle::class.java))
+        // The device has a default SIM for calls; without this, outbound placement
+        // fails with UNAVAILABLE before ever reaching TelecomManager.placeCall.
+        doReturn(mock(PhoneAccountHandle::class.java)).`when`(telecom)
+            .getDefaultOutgoingPhoneAccount(PhoneAccount.SCHEME_TEL)
         doAnswer { originalMute }.`when`(service).microphoneMuted
         endpoint = CellularEndpoint(context, CallAudioOpener { onLost ->
             openCount++
@@ -105,7 +109,15 @@ class CellularOwnershipTest {
     }
 
     private fun drainMain() { while (mainTasks.isNotEmpty()) mainTasks.removeFirst().run() }
-    private fun active() { endpoint.onCallAdded(service, call); state(call, Call.STATE_ACTIVE) }
+    private fun active() {
+        endpoint.onCallAdded(service, call)
+        // The gateway answers the inbound call (as the SIP side would): without this,
+        // CellularLeg treats ACTIVE as "answered on the phone itself" and releases the
+        // call instead of opening the audio tap.
+        leg.answer()
+        drainMain()
+        state(call, Call.STATE_ACTIVE)
+    }
     private fun open() { audioTasks.removeFirst().run(); drainMain() }
 
     @Test fun hangupCancelsQueuedOpenBeforeTelecomDisconnects() {
