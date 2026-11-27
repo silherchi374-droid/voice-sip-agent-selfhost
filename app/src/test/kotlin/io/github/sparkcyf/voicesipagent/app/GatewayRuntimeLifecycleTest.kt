@@ -3,6 +3,7 @@ package io.github.sparkcyf.voicesipagent.app
 import android.app.role.RoleManager
 import android.content.ComponentName
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
@@ -225,6 +226,10 @@ class GatewayRuntimeLifecycleTest {
             `when`(context.applicationContext).thenReturn(context)
             `when`(context.packageName).thenReturn("gateway")
             `when`(context.packageManager).thenReturn(mock(PackageManager::class.java))
+            // GatewayRuntime persists the call log in SharedPreferences ("call_records");
+            // the mock must return a SharedPreferences, or the constructor throws NPE.
+            `when`(context.getSharedPreferences(anyString(), anyInt()))
+                .thenReturn(mock(SharedPreferences::class.java))
             `when`(context.getSystemService(TelecomManager::class.java)).thenReturn(telecom)
             `when`(context.getSystemService(RoleManager::class.java)).thenReturn(role)
             `when`(context.getSystemService(ConnectivityManager::class.java)).thenReturn(network)
