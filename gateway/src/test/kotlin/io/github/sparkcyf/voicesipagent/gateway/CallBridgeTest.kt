@@ -1,6 +1,7 @@
 package io.github.sparkcyf.voicesipagent.gateway
 
 import io.github.sparkcyf.voicesipagent.voice.HangupCause
+import io.github.sparkcyf.voicesipagent.voice.LegDirection
 import io.github.sparkcyf.voicesipagent.voice.LegState
 import io.github.sparkcyf.voicesipagent.voice.PcmFormat
 import org.junit.After
