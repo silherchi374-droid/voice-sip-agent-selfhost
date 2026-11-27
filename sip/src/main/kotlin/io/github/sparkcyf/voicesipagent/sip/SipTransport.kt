@@ -61,5 +61,12 @@ internal class SipTransport(
     fun close() {
         closed = true
         socket.close()
+        // The port stays bound until the receive thread's blocked receive()
+        // unwinds — the socket struct is held by the in-flight syscall, so
+        // close() returning does not mean the port is free yet. A caller that
+        // rebinds the port right after stop() would otherwise see a spurious
+        // BindException on a loaded machine. Wait for the thread (bounded);
+        // it exits as soon as receive() throws on the closed socket.
+        if (Thread.currentThread() !== thread) thread.join(1000)
     }
 }
