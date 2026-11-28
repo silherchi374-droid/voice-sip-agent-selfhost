@@ -57,7 +57,7 @@ data class GatewaySettings(
      */
     val serverMode: Boolean = true,
     /** UI language: "ru", "en" or "ar". Pure UI preference, no SIP restart. */
-    val uiLanguage: String = "ru",
+    val uiLanguage: String = "ar",
     /** Outbound SIM for calls without X-VSA-SIMSLOT; see [DefaultSim] (SYSTEM = Android default). */
     val defaultSimSlot: Int = DefaultSim.SYSTEM,
     /** SIM slots whose incoming calls stay with the phone app; empty = take over all slots. */
@@ -137,13 +137,9 @@ enum class SipStack(val id: String) {
     }
 }
 
-/** First-run UI language from the system locale: Russian → "ru", Arabic → "ar", else "en". */
-private fun systemDefaultUiLang(): String =
-    when (java.util.Locale.getDefault().language) {
-        "ru" -> "ru"
-        "ar" -> "ar"
-        else -> "en"
-    }
+/** First-run UI language: Arabic is this app's language (Saif's choice), whatever the
+ * system locale is. The RU/EN/عربي picker on the main screen still lets anyone switch. */
+private fun systemDefaultUiLang(): String = "ar"
 
 /** SharedPreferences, with the SIP password sealed by an Android Keystore AES-GCM key. */
 class SettingsStore(context: Context) {
@@ -171,8 +167,8 @@ class SettingsStore(context: Context) {
         callAccess = prefs.getInt("call_access", CallAccess.AUTO).takeIf { it in 0..2 } ?: CallAccess.AUTO,
         sipStack = SipStack.of(prefs.getString("sip_stack", null)) ?: SipStack.BUILTIN,
         serverMode = prefs.getBoolean("server_mode", true),
-        // First run (key absent): default to the system language — Russian locale → "ru",
-        // anything else → "en". Once the user picks a language it is saved and always wins.
+        // First run (key absent): default to Arabic — this app's language. Once the user
+        // picks a language it is saved and always wins.
         uiLanguage = prefs.getString("ui_lang", null) ?: systemDefaultUiLang(),
         defaultSimSlot = prefs.getInt("default_sim_slot", DefaultSim.SYSTEM).takeIf(DefaultSim::isValid) ?: DefaultSim.SYSTEM,
         inboundExcludedSlots = prefs.getString("inbound_excluded_slots", "")!!.split(',')
