@@ -58,6 +58,10 @@ class FakeEndpoint(override val name: String) : CallEndpoint {
     /** The caller Party passed to each dial() (display name resolution is visible here). */
     val callers = CopyOnWriteArrayList<Party>()
     var onDial: (FakeLeg) -> Unit = { it.remoteProceeding() }
+    /** External-forward dials (dialExternal), recorded separately from local dials. */
+    val externalDialed = CopyOnWriteArrayList<FakeLeg>()
+    val externalCallers = CopyOnWriteArrayList<Party>()
+    var onDialExternal: (FakeLeg) -> Unit = { it.remoteProceeding() }
     override val status = EndpointStatus(true, "ok")
     override fun setIncomingCallHandler(handler: IncomingCallHandler?) { this.handler = handler }
     override fun addStatusListener(listener: EndpointStatusListener) {}
@@ -67,6 +71,13 @@ class FakeEndpoint(override val name: String) : CallEndpoint {
         dialed += leg
         callers += caller
         onDial(leg)
+        return leg
+    }
+    override fun dialExternal(target: String, caller: Party): CallLeg {
+        val leg = FakeLeg(name, LegDirection.OUTBOUND, Party(target), target, null)
+        externalDialed += leg
+        externalCallers += caller
+        onDialExternal(leg)
         return leg
     }
 
