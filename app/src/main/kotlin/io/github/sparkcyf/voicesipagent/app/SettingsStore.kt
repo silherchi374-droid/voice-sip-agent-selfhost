@@ -110,6 +110,12 @@ data class GatewaySettings(
     val findPhoneEnabled: Boolean = true,
     /** Feature 12: reject incoming calls with no caller ID. Default ON. */
     val blockHiddenNumbers: Boolean = true,
+    /**
+     * Feature 13: forward incoming GSM calls to this external SIP URI instead of the local
+     * phone (e.g. sip:name@sip.linphone.org, so Linphone's servers can push the iPhone).
+     * Empty = off. A failed forward falls back to the local phone.
+     */
+    val externalForwardTarget: String = "",
 ) {
     val sipConfigured: Boolean get() =
         serverMode || (server.isNotBlank() && username.isNotBlank() && password.isNotEmpty())
@@ -198,6 +204,7 @@ class SettingsStore(context: Context) {
         hotspotAutoRestartEnabled = prefs.getBoolean("hotspot_auto_restart_enabled", false),
         findPhoneEnabled = prefs.getBoolean("find_phone_enabled", true),
         blockHiddenNumbers = prefs.getBoolean("block_hidden_numbers", true),
+        externalForwardTarget = prefs.getString("external_forward_target", "")!!,
     )
 
     fun save(s: GatewaySettings) {
@@ -253,6 +260,7 @@ class SettingsStore(context: Context) {
             .putBoolean("hotspot_auto_restart_enabled", s.hotspotAutoRestartEnabled)
             .putBoolean("find_phone_enabled", s.findPhoneEnabled)
             .putBoolean("block_hidden_numbers", s.blockHiddenNumbers)
+            .putString("external_forward_target", s.externalForwardTarget.trim())
             .apply()
     }
 
