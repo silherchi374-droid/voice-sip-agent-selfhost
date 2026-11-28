@@ -5,6 +5,7 @@ import io.github.sparkcyf.voicesipagent.voice.CallLeg
 import io.github.sparkcyf.voicesipagent.voice.HangupCause
 import io.github.sparkcyf.voicesipagent.voice.LegState
 import io.github.sparkcyf.voicesipagent.voice.MediaPort
+import io.github.sparkcyf.voicesipagent.voice.Party
 import io.github.sparkcyf.voicesipagent.voice.redactNumber
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CopyOnWriteArrayList
@@ -30,6 +31,22 @@ class BridgeSession internal constructor(
     var media: MediaBridge? = null
         internal set
     var endedAtMs: Long? = null
+        internal set
+    /** External SIP URI this session first tried (null = normal local dial). */
+    var externalTarget: String? = null
+        internal set
+    /** Local route to fall back to if the external leg fails (null = no local phone). */
+    var localTarget: String? = null
+        internal set
+    /** Caller party (with resolved display name), reused if the session falls back. */
+    var dialCaller: Party? = null
+        internal set
+    var externalForwarded: Boolean = false
+        internal set
+    var fellBackToLocal: Boolean = false
+        internal set
+    /** Forward progress for logging: "attempt" -> "ringing" -> "answered". */
+    var forwardStage: String = "attempt"
         internal set
     internal var answerTimer: ScheduledFuture<*>? = null
     internal var inboundAnswerRequested = false
@@ -79,6 +96,18 @@ class CallBridge(
      * the softphone shows the name. Null = pass the leg's own display name through.
      */
     private val callerDisplayName: ((String?) -> String?)? = null,
+    /**
+     * External forward for inbound legs from side A (cellular): returns the external SIP URI
+     * the call should be forwarded to instead of the local phone (e.g. the user's Linphone
+     * account, so Linphone's servers can push the iPhone). Null = ring the local phone as
+     * usual. Only consulted for side-A legs; the reverse direction never forwards.
+     */
+    private val externalForwardForA: ((CallLeg) -> String?)? = null,
+    /**
+     * Forward attempts and outcomes, for the app log: (target, event) with event in
+     * "attempt" | "ringing" | "answered" | "failed:<cause>" | "fallback". Null = no reporting.
+     */
+    private val onExternalForward: ((String, String) -> Unit)? = null,
 ) {
     private val executor: ScheduledExecutorService =
         ScheduledThreadPoolExecutor(1) { r -> Thread(r, "call-bridge").apply { isDaemon = true } }.apply {
@@ -151,7 +180,10 @@ class CallBridge(
             return
         }
         val target = route.targetFor(leg)
-        if (target.isNullOrEmpty()) {
+        // External forward (cellular -> SIP only): an incoming GSM call goes to the configured
+        // external SIP URI instead of the local phone, so a push-capable server can ring it.
+        val extTarget = if (from === sideA) externalForwardForA?.invoke(leg)?.trim()?.takeIf { it.isNotEmpty() } else null
+        if (target.isNullOrEmpty() && extTarget == null) {
             log("no route for ${from.name} call to ${redactNumber(leg.target)}")
             leg.hangup(HangupCause.NOT_FOUND)
             return
@@ -162,7 +194,7 @@ class CallBridge(
             leg.hangup(cause)
             return
         }
-        if (to === sideA) {
+        if (to === sideA && target != null) {
             val veto = dialPolicyForA.check(target)
                 ?: if (config.allowedDialPrefixes.isNotEmpty() && config.allowedDialPrefixes.none(target::startsWith)) HangupCause.FORBIDDEN else null
             if (veto != null) {
@@ -174,20 +206,25 @@ class CallBridge(
         val s = BridgeSession(nextId++, from.name, leg)
         session = s
         leg.addListener(LegWatcher(s, inbound = true))
-        log("$s: ${from.name} ${redactNumber(leg.remote.number)} -> ${to.name} ${redactNumber(target)}")
         val caller = leg.remote.let { party ->
             callerDisplayName?.invoke(party.number)?.takeIf { it.isNotBlank() }
                 ?.let { party.copy(displayName = it) } ?: party
         }
-        val out = to.dial(target, caller, leg.line)
+        s.dialCaller = caller
+        val out = if (extTarget != null) {
+            s.externalForwarded = true
+            s.externalTarget = extTarget
+            s.localTarget = target
+            log("$s: ${from.name} ${redactNumber(leg.remote.number)} -> external ${redactNumber(extTarget)} (fallback: ${redactNumber(target)})")
+            onExternalForward?.invoke(extTarget, "attempt")
+            to.dialExternal(extTarget, caller)
+        } else {
+            log("$s: ${from.name} ${redactNumber(leg.remote.number)} -> ${to.name} ${redactNumber(target)}")
+            to.dial(target!!, caller, leg.line)
+        }
         s.outbound = out
         out.addListener(LegWatcher(s, inbound = false))
-        s.answerTimer = executor.schedule({
-            if (session === s && s.connectedAtMs == null) {
-                log("$s: answer timeout")
-                endSession(s, HangupCause.NO_ANSWER)
-            }
-        }, config.answerTimeoutMs, TimeUnit.MILLISECONDS)
+        scheduleAnswerTimer(s)
         // The outbound leg may have finished synchronously (e.g. placement refused).
         reevaluate(s)
         notifyChanged(s)
@@ -220,6 +257,11 @@ class CallBridge(
         val b = s.outbound ?: return
 
         if (a.state == LegState.ENDED || b.state == LegState.ENDED) {
+            // The external forward leg failed before answer: ring the local phone instead.
+            if (a.state != LegState.ENDED && b.state == LegState.ENDED && s.connectedAtMs == null &&
+                s.externalForwarded && !s.fellBackToLocal) {
+                if (fallBackToLocal(s)) return
+            }
             val cause = if (a.state == LegState.ENDED) {
                 if (s.connectedAtMs == null) HangupCause.CANCELLED else HangupCause.NORMAL
             } else {
@@ -229,6 +271,10 @@ class CallBridge(
             return
         }
         if ((b.state == LegState.PROCEEDING || b.state == LegState.RINGING) && a.state == LegState.PROCEEDING) a.ring()
+        if (s.externalForwarded && !s.fellBackToLocal && b.state == LegState.RINGING && s.forwardStage == "attempt") {
+            s.forwardStage = "ringing"
+            onExternalForward?.invoke(s.externalTarget ?: "", "ringing")
+        }
         if (b.state == LegState.CONNECTED && a.state < LegState.CONNECTED && !s.inboundAnswerRequested) {
             // Answer is asynchronous: media callbacks can arrive before acceptance is confirmed.
             s.inboundAnswerRequested = true
@@ -239,6 +285,10 @@ class CallBridge(
                 s.connectedAtMs = System.currentTimeMillis()
                 s.answerTimer?.cancel(false)
                 log("$s: both legs connected")
+                if (s.externalForwarded && !s.fellBackToLocal && s.forwardStage != "answered") {
+                    s.forwardStage = "answered"
+                    onExternalForward?.invoke(s.externalTarget ?: "", "answered")
+                }
                 s.mediaTimer = executor.schedule({
                     if (session === s && s.media == null) {
                         log("$s: media did not come up")
@@ -262,6 +312,45 @@ class CallBridge(
                 s.media = null
             }
         }
+    }
+
+    /** (Re)arms the no-answer timer for the current outbound leg. */
+    private fun scheduleAnswerTimer(s: BridgeSession) {
+        s.answerTimer?.cancel(false)
+        s.answerTimer = executor.schedule({
+            if (session === s && s.connectedAtMs == null) {
+                // The external forward rang but nobody answered: give the local phone its chance.
+                if (fallBackToLocal(s)) return@schedule
+                log("$s: answer timeout")
+                endSession(s, HangupCause.NO_ANSWER)
+            }
+        }, config.answerTimeoutMs, TimeUnit.MILLISECONDS)
+    }
+
+    /**
+     * The external forward leg failed before answer: ring the locally registered phone instead.
+     * Returns false when there is nothing to fall back to (no local route, or the session
+     * already fell back / ended / connected). The caller (with resolved display name) is reused,
+     * and the no-answer timer restarts for the local leg.
+     */
+    private fun fallBackToLocal(s: BridgeSession): Boolean {
+        if (session !== s || !s.externalForwarded || s.fellBackToLocal) return false
+        if (s.connectedAtMs != null || s.inbound.state == LegState.ENDED) return false
+        val localTarget = s.localTarget
+        if (localTarget.isNullOrEmpty()) return false
+        val cause = s.outbound?.endCause
+        s.fellBackToLocal = true
+        log("$s: external forward to ${redactNumber(s.externalTarget)} failed (${cause ?: "no answer"}); falling back to local ${redactNumber(localTarget)}")
+        onExternalForward?.invoke(s.externalTarget ?: "", "failed:${cause ?: "no answer"}")
+        onExternalForward?.invoke(s.externalTarget ?: "", "fallback")
+        val caller = s.dialCaller ?: s.inbound.remote
+        val out = sideB.dial(localTarget, caller, s.inbound.line)
+        s.outbound = out
+        out.addListener(LegWatcher(s, inbound = false))
+        scheduleAnswerTimer(s)
+        reevaluate(s)
+        notifyChanged(s)
+        return true
     }
 
     private fun endSession(s: BridgeSession, cause: HangupCause) {
