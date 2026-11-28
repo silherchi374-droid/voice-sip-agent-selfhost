@@ -27,6 +27,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import io.github.sparkcyf.voicesipagent.sip.SipUri
 
 /**
  * The side menu (navigation drawer): all 12 new features live here, each with its own screen.
@@ -40,6 +41,7 @@ import androidx.core.content.ContextCompat
 enum class MoreFeature {
     SMS, USSD, LOW_BATTERY, BLOCKLIST, NIGHT_MODE, CALLER_NAME,
     AUTO_REPLY, REMOTE_RESTART, LOW_BALANCE, HOTSPOT, FIND_PHONE, BLOCK_HIDDEN,
+    EXTERNAL_FORWARD,
 }
 
 fun moreFeatureTitle(f: MoreFeature): String = when (f) {
@@ -55,6 +57,7 @@ fun moreFeatureTitle(f: MoreFeature): String = when (f) {
     MoreFeature.HOTSPOT -> t("Перезапуск точки доступа", "Hotspot auto-restart", "إعادة تشغيل نقطة الاتصال")
     MoreFeature.FIND_PHONE -> t("Найти Infinix", "Find my Infinix", "أين جهاز Infinix")
     MoreFeature.BLOCK_HIDDEN -> t("Скрытые номера", "Block hidden numbers", "حظر الأرقام المخفية")
+    MoreFeature.EXTERNAL_FORWARD -> t("Внешняя переадресация", "External forward", "التحويل الخارجي")
 }
 
 @Composable
@@ -82,6 +85,7 @@ fun MoreFeatureScreen(feature: MoreFeature, rt: GatewayRuntime, modifier: Modifi
             MoreFeature.HOTSPOT -> HotspotFeature(rt, cur)
             MoreFeature.FIND_PHONE -> FindPhoneFeature(rt, cur)
             MoreFeature.BLOCK_HIDDEN -> BlockHiddenFeature(rt, cur)
+            MoreFeature.EXTERNAL_FORWARD -> ExternalForwardFeature(rt, cur)
         }
     }
 }
@@ -271,6 +275,31 @@ private fun BlockHiddenFeature(rt: GatewayRuntime, cur: GatewaySettings) {
                 "On by default. Incoming calls with no caller ID are rejected, logged as missed and emailed (if enabled).",
                 "مفعّل افتراضيًا. المكالمات الواردة بدون رقم تُرفض وتُسجل فائتة وتُرسل بالبريد (إن كان مفعّلًا).")
         }
+    }
+}
+
+@Composable
+private fun ExternalForwardFeature(rt: GatewayRuntime, cur: GatewaySettings) {
+    var text by remember(cur) { mutableStateOf(cur.externalForwardTarget) }
+    var invalid by remember { mutableStateOf(false) }
+    Section(moreFeatureTitle(MoreFeature.EXTERNAL_FORWARD)) {
+        Text(t("Входящий звонок с SIM перенаправляется на внешний SIP-адрес вместо локального телефона 101 — например, sip:имя@sip.linphone.org. Тогда сервер Linphone сам шлёт push на iPhone, и он звонит, даже если Linphone закрыт. Если переадресация не удалась (нет ответа, ошибка, таймаут), звонок возвращается на локальный 101, а пропущенный записывается и шлётся письмом как обычно. Пустое поле = выключено.",
+            "An incoming SIM call is forwarded to an external SIP address instead of the local phone 101 — e.g. sip:name@sip.linphone.org. Linphone's server then sends a push to the iPhone, so it rings even with Linphone closed. If the forward fails (no answer, error, timeout), the call falls back to the local 101, and a missed call is logged and emailed as usual. Empty = off.",
+            "تُحوَّل المكالمة الواردة من الشريحة إلى عنوان SIP خارجي بدل الهاتف المحلي 101 — مثال sip:الاسم@sip.linphone.org. عندها يرسل خادم Linphone إشعارًا للآيفون فيرن حتى وLinphone مغلق. إذا فشل التحويل (لا رد، خطأ، انتهاء المهلة) تعود المكالمة إلى 101 المحلي، وتُسجل الفائتة وتُرسل بالبريد كالعادة. فارغ = متوقف."),
+            style = MaterialTheme.typography.bodySmall)
+        Field(t("Внешний SIP-адрес", "External SIP address", "عنوان SIP الخارجي"), text) { text = it; invalid = false }
+        if (invalid) {
+            Text(t("Нужен адрес вида sip:имя@хост, например sip:silherchi@sip.linphone.org.",
+                "Must look like sip:name@host, e.g. sip:silherchi@sip.linphone.org.",
+                "يجب أن يكون على شكل sip:الاسم@المضيف، مثال sip:silherchi@sip.linphone.org."),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+        Button(onClick = {
+            val v = text.trim()
+            val ok = v.isEmpty() || SipUri.parse(v)?.let { it.scheme == "sip" && it.host.isNotBlank() } == true
+            invalid = !ok
+            if (ok) rt.applySettings(cur.copy(externalForwardTarget = v))
+        }) { Text(t("Сохранить", "Save", "حفظ")) }
     }
 }
 
