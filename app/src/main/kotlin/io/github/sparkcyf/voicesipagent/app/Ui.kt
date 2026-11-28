@@ -41,7 +41,7 @@ enum class UiLang { RU, EN, AR;
  * subtree reads it.
  */
 @Volatile
-var currentUiLang: UiLang = UiLang.RU
+var currentUiLang: UiLang = UiLang.AR
 
 /**
  * Pick the string for the current UI language. Safe to call anywhere. Arabic falls back to the
