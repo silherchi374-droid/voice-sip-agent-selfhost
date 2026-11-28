@@ -161,6 +161,19 @@ class SipUserAgent(
     }
 
     /**
+     * Outbound INVITE to an arbitrary external SIP URI (external-forward feature), sent directly
+     * to the URI's host — not to the registered phone ([serverAddr]) and not via any proxy. The
+     * request is only ever placed because a genuine incoming GSM call arrived and the user
+     * configured the target; there is no remote trigger for it. No digest credentials exist for
+     * the far side, so a 401/407 from it fails the leg (see [SipCall]) instead of retrying.
+     */
+    override fun dialExternal(target: String, caller: Party): CallLeg {
+        val call = SipCall(this, LegDirection.OUTBOUND, Party(target), target, null, newCallId(), newTag())
+        post { call.startOutboundExternal(target, caller) }
+        return call
+    }
+
+    /**
      * Server mode: deliver an incoming SMS to the registered phone as an out-of-dialog SIP MESSAGE
      * (shown as a chat message in the softphone). Returns false if no phone is currently registered.
      */
@@ -661,8 +674,19 @@ class SipUserAgent(
         return tx
     }
 
+    /** Like [sendClient] but to an explicit destination (external-forward INVITE/ACK/BYE). */
+    internal fun sendClientTo(req: SipRequest, dest: InetSocketAddress, handler: (SipResponse?) -> Unit): ClientTransaction {
+        val tx = ClientTransaction(this, req, dest, handler)
+        clientTxs[tx.key] = tx
+        tx.start()
+        return tx
+    }
+
     /** Fire-and-forget (ACK for 2xx). */
     internal fun sendRaw(req: SipRequest) = transport.send(req, serverAddr)
+
+    /** Fire-and-forget to an explicit destination (external-forward ACK). */
+    internal fun sendRawTo(req: SipRequest, dest: InetSocketAddress) = transport.send(req, dest)
 
     internal fun removeClientTx(tx: ClientTransaction) {
         if (clientTxs[tx.key] === tx) clientTxs.remove(tx.key)
