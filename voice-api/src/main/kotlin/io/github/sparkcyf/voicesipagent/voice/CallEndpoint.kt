@@ -29,4 +29,13 @@ interface CallEndpoint {
      * already [LegState.ENDED] (and its listeners still fire).
      */
     fun dial(target: String, caller: Party, line: Int? = null): CallLeg
+
+    /**
+     * Starts an outbound call to an arbitrary external SIP URI (e.g. `sip:user@sip.linphone.org`),
+     * sent directly to the URI's host — not to the endpoint's usual destination (the registered
+     * phone / upstream proxy). Used by the external-forward feature: a GSM call is forwarded to
+     * the user's Linphone account so Linphone's servers can push the iPhone. Default: fall back
+     * to [dial]; endpoints that can place a direct call override this.
+     */
+    fun dialExternal(target: String, caller: Party): CallLeg = dial(target, caller, null)
 }
