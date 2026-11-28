@@ -47,6 +47,12 @@ internal class SipCall(
     private var cancelPending = false
     private var cancelSent = false
     private var ringTimer: ScheduledFuture<*>? = null
+    /**
+     * External-forward calls only: the resolved address of the forwarded-to SIP URI. Dialog
+     * requests (ACK/BYE/CANCEL) go there, not to the registered phone / upstream server.
+     * Null for normal local/outbound legs.
+     */
+    private var externalDest: InetSocketAddress? = null
 
     // Inbound INVITE
     private var inviteServerTx: ServerTransaction? = null
@@ -125,6 +131,55 @@ internal class SipCall(
 
     private var callerForRetry: Party? = null
 
+    /**
+     * Outbound INVITE to an arbitrary external SIP URI (external-forward feature), sent directly
+     * to the URI's host — not to the registered phone and not via any proxy. The From shows the
+     * GSM caller's number, like the local path. A malformed URI or an unresolvable host fails
+     * the leg at once (UNAVAILABLE) so the bridge can fall back to the local phone.
+     */
+    fun startOutboundExternal(targetUri: String, caller: Party) {
+        val parsed = SipUri.parse(targetUri)
+        val host = parsed?.host?.takeIf { it.isNotBlank() }
+        if (parsed == null || parsed.scheme != "sip" || host == null) {
+            log.warn("external dial refused: unparsable target '$targetUri'")
+            end(HangupCause.UNAVAILABLE)
+            finish()
+            return
+        }
+        val dest = try {
+            InetSocketAddress(InetAddress.getByName(host), parsed.port ?: 5060)
+        } catch (e: Exception) {
+            log.warn("external dial refused: cannot resolve $host", e)
+            end(HangupCause.UNAVAILABLE)
+            finish()
+            return
+        }
+        externalDest = dest
+        val display = caller.displayName ?: caller.number ?: "gateway"
+        val fromUser = caller.number ?: "gateway"
+        localUri = NameAddr(display, "sip:$fromUser@${ua.selfDomain}")
+        remoteUri = NameAddr(null, targetUri)
+        remoteTarget = targetUri
+        ua.registerCall(this)
+        try {
+            rtpSocket = ua.newRtpSocket()
+        } catch (e: Exception) {
+            log.warn("RTP bind failed", e)
+            end(HangupCause.INTERNAL_ERROR)
+            finish()
+            return
+        }
+        log.info("dialing external ${redactNumber(targetUri)} (call $id)")
+        sendInvite(null, caller)
+        transition(LegState.PROCEEDING)
+        ringTimer = ua.schedule(config.ringTimeoutMs) {
+            if (state < LegState.CONNECTED) {
+                log.info("call $id ring timeout")
+                doHangup(HangupCause.NO_ANSWER)
+            }
+        }
+    }
+
     private fun sendInvite(auth: Pair<String, String>?, caller: Party?) {
         if (caller != null) callerForRetry = caller
         val req = ua.newRequest("INVITE", remoteTarget, localUri.withTag(localTag), remoteUri, callId, ++localCseq)
@@ -142,7 +197,9 @@ internal class SipCall(
         req.body = localSdp(config.codecs.map { it.payloadType to it }, Sdp.DEFAULT_TE_PT, "sendrecv").toByteArray()
         req.headers.remove("Accept")
         inviteReq = req
-        inviteTx = ua.sendClient(req) { r -> onInviteResponse(req, r) }
+        val dest = externalDest
+        inviteTx = if (dest != null) ua.sendClientTo(req, dest) { r -> onInviteResponse(req, r) }
+            else ua.sendClient(req) { r -> onInviteResponse(req, r) }
     }
 
     private fun onInviteResponse(req: SipRequest, r: SipResponse?) {
@@ -184,6 +241,15 @@ internal class SipCall(
             return
         }
         if ((r.code == 401 || r.code == 407) && authAttempts++ < 2 && state != LegState.ENDED) {
+            if (externalDest != null) {
+                // The far side challenged the forward; we hold no credentials for its domain,
+                // so retrying with an empty digest would only burn a round trip. Fail the leg
+                // (the bridge falls back to the local phone) instead.
+                log.info("call $id: external side challenged (${r.code}); no credentials for that domain")
+                end(SipCodes.toCause(r.code))
+                finish()
+                return
+            }
             val auth = ua.authorizationFor(r, "INVITE", req.uri)
             if (auth != null) {
                 cancelSent = false
@@ -198,7 +264,7 @@ internal class SipCall(
 
     fun onStray2xx(r: SipResponse) {
         // Retransmitted 2xx: our ACK was lost.
-        if (r.cseq?.seq == inviteReq?.cseq?.seq) ackFor2xx?.let(ua::sendRaw)
+        if (r.cseq?.seq == inviteReq?.cseq?.seq) ackFor2xx?.let(::sendDialog)
     }
 
     private fun sendAck2xx(r: SipResponse) {
@@ -206,7 +272,19 @@ internal class SipCall(
         val ack = ua.newRequest("ACK", remoteTarget, localUri.withTag(localTag), remoteWithTag(), callId, cseq, routeSet)
         ack.headers.remove("User-Agent")
         ackFor2xx = ack
-        ua.sendRaw(ack)
+        sendDialog(ack)
+    }
+
+    /** Dialog requests (ACK/BYE/CANCEL) go to the far side's address for external calls, not to
+     *  the registered phone / upstream server. */
+    private fun sendDialog(req: SipRequest) {
+        val dest = externalDest
+        if (dest != null) ua.sendRawTo(req, dest) else ua.sendRaw(req)
+    }
+
+    private fun sendDialogTx(req: SipRequest, handler: (SipResponse?) -> Unit) {
+        val dest = externalDest
+        if (dest != null) ua.sendClientTo(req, dest, handler) else ua.sendClient(req, handler)
     }
 
     private fun sendCancel() {
@@ -222,7 +300,7 @@ internal class SipCall(
         h.add("CSeq", "${invite.cseq!!.seq} CANCEL")
         // The CANCEL transaction completes (or times out) after the leg already ended; release the
         // call then, so it does not linger in the UA's call table with a bound RTP socket.
-        ua.sendClient(SipRequest("CANCEL", invite.uri, h)) { finish() }
+        sendDialogTx(SipRequest("CANCEL", invite.uri, h)) { finish() }
     }
 
     // ------------------------------------------------------------ inbound
@@ -391,7 +469,7 @@ internal class SipCall(
 
     private fun sendBye() {
         val bye = ua.newRequest("BYE", remoteTarget, localUri.withTag(localTag), remoteWithTag(), callId, ++localCseq, routeSet)
-        ua.sendClient(bye) { r -> if (r == null || !r.isProvisional) finish() }
+        sendDialogTx(bye) { r -> if (r == null || !r.isProvisional) finish() }
     }
 
     private fun remoteWithTag(): NameAddr = remoteTag?.let(remoteUri::withTag) ?: remoteUri
