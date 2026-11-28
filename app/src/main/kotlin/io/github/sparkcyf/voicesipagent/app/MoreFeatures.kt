@@ -45,18 +45,18 @@ enum class MoreFeature {
 }
 
 fun moreFeatureTitle(f: MoreFeature): String = when (f) {
-    MoreFeature.SMS -> t("SMS с iPhone", "SMS from iPhone", "إرسال رسائل من الآيفون")
-    MoreFeature.USSD -> t("USSD: баланс", "USSD balance check", "فحص الرصيد USSD")
+    MoreFeature.SMS -> t("SMS с iPhone", "SMS from iPhone", "SMS من الآيفون")
+    MoreFeature.USSD -> t("USSD: баланс", "USSD balance check", "USSD: الرصيد")
     MoreFeature.LOW_BATTERY -> t("Низкий заряд", "Low-battery alert", "تنبيه البطارية المنخفضة")
-    MoreFeature.BLOCKLIST -> t("Чёрный список", "Blocklist", "قائمة الحظر")
+    MoreFeature.BLOCKLIST -> t("Чёрный список", "Blocklist", "القائمة السوداء")
     MoreFeature.NIGHT_MODE -> t("Ночной режим", "Night mode", "الوضع الليلي")
     MoreFeature.CALLER_NAME -> t("Имя звонящего", "Caller name", "اسم المتصل")
-    MoreFeature.AUTO_REPLY -> t("Автоответ SMS", "Auto-reply SMS", "الرد التلقائي")
-    MoreFeature.REMOTE_RESTART -> t("Перезапуск удалённо", "Remote restart", "إعادة التشغيل عن بعد")
+    MoreFeature.AUTO_REPLY -> t("Автоответ SMS", "Auto-reply SMS", "رد SMS تلقائي")
+    MoreFeature.REMOTE_RESTART -> t("Перезапуск удалённо", "Remote restart", "إعادة التشغيل عن بُعد")
     MoreFeature.LOW_BALANCE -> t("Низкий баланс", "Low-balance alert", "تنبيه الرصيد المنخفض")
     MoreFeature.HOTSPOT -> t("Перезапуск точки доступа", "Hotspot auto-restart", "إعادة تشغيل نقطة الاتصال")
-    MoreFeature.FIND_PHONE -> t("Найти Infinix", "Find my Infinix", "أين جهاز Infinix")
-    MoreFeature.BLOCK_HIDDEN -> t("Скрытые номера", "Block hidden numbers", "حظر الأرقام المخفية")
+    MoreFeature.FIND_PHONE -> t("Найти Infinix", "Find my Infinix", "اعثر على Infinix")
+    MoreFeature.BLOCK_HIDDEN -> t("Скрытые номера", "Block hidden numbers", "الأرقام المخفية")
     MoreFeature.EXTERNAL_FORWARD -> t("Внешняя переадресация", "External forward", "التحويل الخارجي")
 }
 
