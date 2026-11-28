@@ -716,6 +716,15 @@ class GatewayRuntime private constructor(context: Context) {
                     app.checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
                 ) contactLookup.nameFor(number) else null
             },
+            // Feature 13: forward incoming GSM calls to the configured external SIP URI
+            // (e.g. the user's Linphone account) so Linphone's servers can push the iPhone.
+            // A failed forward falls back to the local phone; every attempt is logged.
+            externalForwardForA = { leg ->
+                if (leg.kind == "cellular") settings.externalForwardTarget.trim().takeIf { it.isNotEmpty() } else null
+            },
+            onExternalForward = { target, event ->
+                AppLog.i("external forward ${redactNumber(target)}: $event")
+            },
         )
         b.addListener { session ->
             val description = describe(session)
@@ -737,7 +746,12 @@ class GatewayRuntime private constructor(context: Context) {
     private fun describe(s: BridgeSession): String? {
         if (s.endedAtMs != null) return null
         val out = s.outbound
-        return "${s.origin}: ${redactNumber(s.inbound.remote.number)} ${s.inbound.state} -> ${out?.kind} ${out?.state ?: LegState.NEW}"
+        val via = when {
+            s.externalForwarded && s.fellBackToLocal -> " (forward failed, local)"
+            s.externalForwarded -> " (via ${s.externalTarget})"
+            else -> ""
+        }
+        return "${s.origin}: ${redactNumber(s.inbound.remote.number)} ${s.inbound.state} -> ${out?.kind} ${out?.state ?: LegState.NEW}$via"
     }
 
     // ------------------------------------------------------------ external controls
